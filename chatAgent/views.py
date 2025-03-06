@@ -8,7 +8,6 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.authtoken.models import Token
 from django.contrib.auth import authenticate
-
 from .models import User, Session, Message
 from .serializers import UserSerializer, SessionSerializer, MessageSerializer
 
@@ -16,6 +15,7 @@ class UserView(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     queryset = User.objects.all()
     serializer_class = UserSerializer
+
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
@@ -25,62 +25,67 @@ class LoginView(APIView):
         password = request.data.get('password')
 
         user = User.objects.filter(email=email).first()
-        if user and user.check_password(password):  # Use check_password instead of authenticate
+        if user and user.check_password(password):  
             token, _ = Token.objects.get_or_create(user=user)
             return Response({"token": token.key}, status=status.HTTP_200_OK)
         
         return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
 
 class SessionView(APIView):
-    authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, session_id=None):
-        if session_id:
-            session = get_object_or_404(Session, id=session_id, user=request.user)
-            serializer = SessionSerializer(session)
-            return Response(serializer.data)
+    def get(self, request):
+        """Retrieve all sessions for the authenticated user"""
         sessions = Session.objects.filter(user=request.user)
         serializer = SessionSerializer(sessions, many=True)
-        return Response(serializer.data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
+        """Create a new session for the authenticated user"""
         session = Session.objects.create(user=request.user)
         serializer = SessionSerializer(session)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
+
 class MessageView(APIView):
-    authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
+        """Retrieve all messages for a given session (must belong to user)"""
         session = get_object_or_404(Session, id=session_id, user=request.user)
-        messages = session.messages.all()
+        messages = Message.objects.filter(session=session)
         serializer = MessageSerializer(messages, many=True)
-        return Response(serializer.data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request, session_id):
+        """Send a message within a session and trigger n8n workflow"""
         session = get_object_or_404(Session, id=session_id, user=request.user)
 
-        message_content = request.data.get('message')
-        if not message_content:
+        # Get user message from request data
+        content = request.data.get("content")
+        if not content:
             return Response({"error": "Message content is required"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Store user message in the database
+        message = Message.objects.create(session=session, content=content, sender="user")
+        serializer = MessageSerializer(message)
+
+        # Prepare data to send to n8n webhook
         data = {
-            'sessionId': str(session_id),
-            'userInput': message_content,
-            'userId': str(request.user.id)
+            "sessionId": str(session.id),
+            "userInput": content,
+            "userId": str(request.user.id)
         }
 
-        response = requests.post(
-            settings.N8N_WEBHOOK_URL,
-            json=data,
-            headers={'Content-Type': 'application/json'}
-        )
+        try:
+            # Call n8n workflow to process the message
+            response = requests.post(
+                settings.N8N_WEBHOOK_URL,
+                json=data,
+                headers={"Content-Type": "application/json"}
+            )
+            response_data = response.json()
+        except requests.RequestException:
+            return Response({"error": "Failed to connect to n8n"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        if response.status_code != 200:
-            return Response({"error": "n8n webhook call failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-        Message.objects.create(session=session, content=message_content, sender='user')
-
-        return Response(response.json(), status=status.HTTP_201_CREATED)
+        return Response({"message": serializer.data, "n8n_response": response_data}, status=status.HTTP_201_CREATED)

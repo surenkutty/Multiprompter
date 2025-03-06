@@ -1,1 +1,14 @@
-/db.sqlite3
+# Ignore Django migration files
+*/migrations/*.py
+!*/migrations/__init__.py
+
+*/migrations/__pycache__
+*/__pycache__
+
+.env
+env
+venv
+
+
+# Ignore SQLite database files
+db.sqlite3
